@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+out=""
+prev=""
+for arg in "$@"; do
+  if [[ "${arg}" == --output-file=* ]]; then
+    out="${arg#*=}"
+  elif [[ "${prev}" == "--output-file" || "${prev}" == "-o" ]]; then
+    out="${arg}"
+  fi
+  prev="${arg}"
+done
+in="${@: -1}"
+if [[ -z "${out}" || -z "${in}" ]]; then
+  echo "nvprune-stub: missing input or output" >&2
+  exit 2
+fi
+mkdir -p "$(dirname "${out}")"
+cp -f "${in}" "${out}"
