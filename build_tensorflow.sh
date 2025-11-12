@@ -9,6 +9,7 @@ TOOLS_DIR="${ROOT_DIR}/tools"
 SRC_DIR="${ROOT_DIR}/sources"
 DIST_DIR="${ROOT_DIR}/dist"
 LOG_DIR="${ROOT_DIR}/logs"
+# Conda build environment (created automatically if missing).
 VENV_DIR="${ROOT_DIR}/.tf-build-venv"
 TF_REPO="${SRC_DIR}/tensorflow"
 BAZELISK_BIN="${TOOLS_DIR}/bazelisk"
@@ -16,12 +17,58 @@ BAZELISK_URL="https://github.com/bazelbuild/bazelisk/releases/latest/download/ba
 GITHUB_API_RELEASE_URL="https://api.github.com/repos/tensorflow/tensorflow/releases/latest"
 PROFILE_DIR="${ROOT_DIR}/profiles"
 CLANG_PROFILE_LIB_DIR=""
+# Single flag to control the hermetic Python version used throughout the build.
+#We put 3.13 instead of 3.13.9 to avoid missing manifestors
+PYTHON_VERSION="${PYTHON_VERSION:-3.13}"
 declare -ag LAST_BUILT_WHEELS=()
+CONDA_BIN=""
 
 log() {
   local ts
   ts="$(date '+%Y-%m-%d %H:%M:%S')"
   echo "[$ts] $*"
+}
+
+find_conda_binary() {
+  if [[ -n "${CONDA_BIN:-}" ]]; then
+    printf '%s\n' "${CONDA_BIN}"
+    return 0
+  fi
+
+  local candidate=""
+  if [[ -n "${CONDA_EXE:-}" && -x "${CONDA_EXE}" ]]; then
+    candidate="${CONDA_EXE}"
+  elif command -v conda >/dev/null 2>&1; then
+    candidate="$(command -v conda)"
+  fi
+
+  if [[ -z "${candidate}" ]]; then
+    return 1
+  fi
+
+  CONDA_BIN="${candidate}"
+  printf '%s\n' "${CONDA_BIN}"
+}
+
+activate_build_python_env() {
+  local conda_bin
+  if ! conda_bin="$(find_conda_binary)"; then
+    log "Conda executable not found. Install Miniconda/Anaconda (or export CONDA_EXE) and re-run."
+    exit 1
+  fi
+
+  export CONDA_CHANGEPS1="${CONDA_CHANGEPS1:-no}"
+  # shellcheck disable=SC1090,SC1091
+  eval "$("${conda_bin}" shell.bash hook)"
+  conda activate "${VENV_DIR}"
+}
+
+deactivate_build_python_env() {
+  if declare -f conda >/dev/null 2>&1; then
+    conda deactivate >/dev/null 2>&1 || true
+  elif command -v deactivate >/dev/null 2>&1; then
+    deactivate
+  fi
 }
 
 ensure_directories() {
@@ -137,7 +184,7 @@ prepare_cuda_toolchain() {
   export USE_CUDA_TAR_ARCHIVE_FILES="${USE_CUDA_TAR_ARCHIVE_FILES:-1}"
 
   # Ensure hermetic Python in external repos, independent of host venv.
-  export HERMETIC_PYTHON_VERSION="${HERMETIC_PYTHON_VERSION:-3.12}"
+  export HERMETIC_PYTHON_VERSION="${HERMETIC_PYTHON_VERSION:-${PYTHON_VERSION}}"
 }
 
 
@@ -247,18 +294,39 @@ PY
 }
 
 ensure_python_venv() {
-  if ! python3 -m venv --help >/dev/null 2>&1; then
-    log "Python venv module unavailable. Install python3-venv via your package manager and re-run."
+  local conda_bin
+  if ! conda_bin="$(find_conda_binary)"; then
+    log "Conda executable not found. Install Miniconda/Anaconda (or export CONDA_EXE) and re-run."
     exit 1
   fi
 
-  if [[ ! -d "${VENV_DIR}" ]]; then
-    log "Creating Python build virtual environment at ${VENV_DIR}"
-    python3 -m venv "${VENV_DIR}"
+  local recreate_env=0
+  if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
+    recreate_env=1
+  else
+    local current_py
+    if ! current_py="$("${VENV_DIR}/bin/python" - <<'PY' 2>/dev/null
+import platform
+print(platform.python_version())
+PY
+      )"; then
+      recreate_env=1
+    elif [[ "${current_py}" != "${PYTHON_VERSION}" ]]; then
+      log "Existing build env uses Python ${current_py}; expected ${PYTHON_VERSION}. Recreating."
+      "${conda_bin}" env remove -p "${VENV_DIR}" -y >/dev/null 2>&1 || rm -rf "${VENV_DIR}"
+      recreate_env=1
+    fi
   fi
 
-  # shellcheck disable=SC1091
-  source "${VENV_DIR}/bin/activate"
+  if [[ "${recreate_env}" -eq 1 ]]; then
+    if [[ -d "${VENV_DIR}" ]]; then
+      rm -rf "${VENV_DIR}"
+    fi
+    log "Creating Conda build environment at ${VENV_DIR} (Python ${PYTHON_VERSION})"
+    "${conda_bin}" create --yes -p "${VENV_DIR}" "python=${PYTHON_VERSION}" pip
+  fi
+
+  activate_build_python_env
   log "Ensuring Python build dependencies are up to date"
   python -m pip install --upgrade pip setuptools wheel
   python -m pip install --upgrade numpy packaging absl-py keras_preprocessing opt_einsum
@@ -352,7 +420,7 @@ run_profile_workload() {
   local wheel_path="$2"
 
   log "Running profiling workload using ${wheel_path}"
-  source "${VENV_DIR}/bin/activate"
+  activate_build_python_env
   pip install --quiet --upgrade --force-reinstall "${wheel_path}"
 
   rm -f "${profile_dir}"/*.profraw
@@ -380,9 +448,7 @@ model.fit(x_data, y_data, epochs=2, batch_size=128, verbose=0)
 model.predict(x_data[:256], verbose=0)
 PY
 
-  if command -v deactivate >/dev/null 2>&1; then
-    deactivate
-  fi
+  deactivate_build_python_env
 }
 
 merge_profile_data() {
@@ -492,7 +558,7 @@ validate_tensorflow_runtime() {
 }
 
 configure_tensorflow() {
-  source "${VENV_DIR}/bin/activate"
+  activate_build_python_env
 
   log "Configuring TensorFlow build (JAVA_HOME=${JAVA_HOME:-unknown})"
 
@@ -561,7 +627,7 @@ configure_tensorflow() {
 
 
 build_tensorflow_wheel() {
-  source "${VENV_DIR}/bin/activate"
+  activate_build_python_env
 
   pushd "${TF_REPO}" >/dev/null
   reset_cuda_environment
@@ -629,7 +695,7 @@ build_tensorflow_wheel() {
     "--action_env=TF_CUDA_COMPUTE_CAPABILITIES=${TF_CUDA_COMPUTE_CAPABILITIES}"
     "--repo_env=HERMETIC_CUDA_COMPUTE_CAPABILITIES=${HERMETIC_CUDA_COMPUTE_CAPABILITIES:-${TF_CUDA_COMPUTE_CAPABILITIES}}"
     "--repo_env=USE_CUDA_TAR_ARCHIVE_FILES=1"
-    "--repo_env=HERMETIC_PYTHON_VERSION=${HERMETIC_PYTHON_VERSION:-3.12}"
+    "--repo_env=HERMETIC_PYTHON_VERSION=${HERMETIC_PYTHON_VERSION:-${PYTHON_VERSION}}"
   )
 
   if [[ "${mode}" == "profile_generate" ]]; then
