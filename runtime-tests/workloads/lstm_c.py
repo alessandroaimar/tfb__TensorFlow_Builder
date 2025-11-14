@@ -45,8 +45,6 @@ def build_dataset(batch_size: int) -> tf.data.Dataset:
     dataset = dataset.map(map_fn, num_parallel_calls=8)
     dataset = dataset.flat_map(lambda seq, lbl: tf.data.Dataset.from_tensors((seq, lbl)))
     dataset = dataset.batch(batch_size, drop_remainder=True)
-    dataset = dataset.unbatch()
-    dataset = dataset.batch(batch_size, drop_remainder=True)
     dataset = dataset.cache()
     dataset = dataset.prefetch(32)
     return dataset.with_options(dataset_options())
@@ -83,7 +81,7 @@ def main():
     configure_device("CPU", "LSTM-C")
     configure_threads(inter_op=16, intra_op=32)
 
-    batch_size = 16
+    batch_size = 8
     dataset = build_dataset(batch_size)
 
     model = RaggedLSTM()
@@ -95,10 +93,11 @@ def main():
     )
 
     callback = BatchBeginCallback("lstm_c_batch_begin")
-    model.fit(dataset, epochs=3, steps_per_epoch=20, callbacks=[callback])
+    model.fit(dataset, epochs=2, steps_per_epoch=1000, callbacks=[callback])
 
     ragged = tf.ragged.constant([np.random.randn(30, FEATURES), np.random.randn(40, FEATURES)], dtype=tf.float32)
-    outputs = model(ragged.to_tensor(), training=False)
+    for _ in range(100):
+        outputs = model(ragged.to_tensor(), training=False)
     print("Inference logits shape:", outputs.shape)
 
 

@@ -116,10 +116,11 @@ def main():
     )
 
     callback = BatchBeginCallback("transformer_d_batch_begin")
-    model.fit(dataset, epochs=3, steps_per_epoch=20, callbacks=[callback])
+    model.fit(dataset, epochs=2, steps_per_epoch=1000, callbacks=[callback])
 
     x_infer = tf.random.uniform((batch_size, SEQ_LEN), maxval=VOCAB, dtype=tf.int32)
-    outputs = model(x_infer, training=False)
+    for _ in range(100):
+        outputs = model(x_infer, training=False)
     print("Inference logits shape:", outputs.shape)
 
 

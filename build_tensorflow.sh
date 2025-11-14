@@ -4,6 +4,19 @@
 
 set -euo pipefail
 
+PAUSE_ON_FAILURE="${TFB_PAUSE_ON_FAILURE:-1}"
+
+tfb_exit_handler() {
+  local status=$?
+  trap - EXIT
+  if [[ "${PAUSE_ON_FAILURE}" == "1" && "${status}" -ne 0 && -t 1 ]]; then
+    printf '\n[ERROR] build_tensorflow.sh failed (exit code %s).\n' "${status}"
+    read -r -p "Press Enter to close this terminal..." _
+  fi
+  exit "${status}"
+}
+trap tfb_exit_handler EXIT
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOLS_DIR="${ROOT_DIR}/tools"
 SRC_DIR="${ROOT_DIR}/sources"
@@ -17,16 +30,37 @@ BAZELISK_URL="https://github.com/bazelbuild/bazelisk/releases/latest/download/ba
 GITHUB_API_RELEASE_URL="https://api.github.com/repos/tensorflow/tensorflow/releases/latest"
 PROFILE_DIR="${ROOT_DIR}/profiles"
 CLANG_PROFILE_LIB_DIR=""
+HERMETIC_CUDA_LIB_PATHS=""
+HERMETIC_CUDA_LIBS_APPLIED=0
+HERMETIC_CUDA_TOOLKIT_DIR=""
+HERMETIC_XLA_DATA_FLAG_APPLIED=0
+LOG_STAGE_EMITTED=0
 # Single flag to control the hermetic Python version used throughout the build.
 #We put 3.13 instead of 3.13.9 to avoid missing manifestors
 PYTHON_VERSION="${PYTHON_VERSION:-3.13}"
 declare -ag LAST_BUILT_WHEELS=()
 CONDA_BIN=""
+REFERENCE_ENV_DIR="${ROOT_DIR}/.tf-reference-venv"
+REFERENCE_LOG_DIR="${LOG_DIR}/workloads-reference"
+REFERENCE_SUMMARY_FILE="${REFERENCE_LOG_DIR}/runtime-summary.json"
 
 log() {
   local ts
   ts="$(date '+%Y-%m-%d %H:%M:%S')"
   echo "[$ts] $*"
+}
+
+log_stage() {
+  local title="$*"
+  if [[ "${LOG_STAGE_EMITTED}" -ne 0 ]]; then
+    printf '\n\n'
+  fi
+  LOG_STAGE_EMITTED=1
+  printf '\n'
+  log "=================================================================="
+  log "== ${title}"
+  log "=================================================================="
+  printf '\n'
 }
 
 find_conda_binary() {
@@ -48,6 +82,36 @@ find_conda_binary() {
 
   CONDA_BIN="${candidate}"
   printf '%s\n' "${CONDA_BIN}"
+}
+
+create_ephemeral_conda_env() {
+  local env_path="$1"
+  local python_version="$2"
+  shift 2 || true
+  local conda_bin
+  if ! conda_bin="$(find_conda_binary)"; then
+    log "Conda executable not found. Install Miniconda/Anaconda (or export CONDA_EXE) and re-run."
+    exit 1
+  fi
+  rm -rf "${env_path}"
+  local -a packages=("python=${python_version}" pip "$@")
+  log "Creating temporary Conda environment at ${env_path} (Python ${python_version})"
+  "${conda_bin}" create --yes -p "${env_path}" "${packages[@]}"
+}
+
+wheel_python_version() {
+  local wheel_path="$1"
+  local filename
+  filename="$(basename "${wheel_path}")"
+  if [[ "${filename}" =~ -(cp[0-9]+)- ]]; then
+    local tag="${BASH_REMATCH[1]}"
+    local digits="${tag:2}"
+    local major="${digits:0:1}"
+    local minor="${digits:1}"
+    printf '%s.%s\n' "${major}" "${minor}"
+    return 0
+  fi
+  printf '%s\n' "${PYTHON_VERSION}"
 }
 
 activate_build_python_env() {
@@ -72,10 +136,12 @@ deactivate_build_python_env() {
 }
 
 ensure_directories() {
+  log "Ensuring workspace directories exist under ${ROOT_DIR}"
   mkdir -p "${TOOLS_DIR}" "${SRC_DIR}" "${DIST_DIR}" "${LOG_DIR}" "${ROOT_DIR}/runtime-tests"
 }
 
 ensure_system_prereqs() {
+  log "Verifying required host tooling is available"
   local required_commands=(
     bash
     git
@@ -87,6 +153,7 @@ ensure_system_prereqs() {
     tar
     unzip
     zip
+    find
   )
 
   local missing=()
@@ -120,6 +187,8 @@ ensure_system_prereqs() {
       fi
     fi
   fi
+
+  log "Host toolchain prerequisites satisfied"
 }
 
 check_perf_dependencies() {
@@ -170,6 +239,7 @@ reset_cuda_environment() {
 }
 
 prepare_cuda_toolchain() {
+  log "Initializing hermetic CUDA toolchain configuration"
   reset_cuda_environment
   export TF_NEED_CUDA=1
   export TF_NEED_ROCM="${TF_NEED_ROCM:-0}"
@@ -185,6 +255,85 @@ prepare_cuda_toolchain() {
 
   # Ensure hermetic Python in external repos, independent of host venv.
   export HERMETIC_PYTHON_VERSION="${HERMETIC_PYTHON_VERSION:-${PYTHON_VERSION}}"
+  log "CUDA compute capabilities set to ${compute_caps}; hermetic tarball toolchain enabled"
+}
+
+discover_hermetic_cuda_lib_dirs() {
+  if [[ -n "${HERMETIC_CUDA_LIB_PATHS:-}" ]]; then
+    return 0
+  fi
+
+  local external_root="${TF_REPO}/bazel-tensorflow/external"
+  if [[ ! -d "${external_root}" ]]; then
+    return 1
+  fi
+
+  log "Scanning ${external_root} for CUDA/NCCL runtime libraries"
+  local -a dirs=()
+  declare -A seen=()
+
+  while IFS= read -r -d '' candidate; do
+    local resolved
+    resolved="$(readlink -f "${candidate}")"
+    if [[ -n "${resolved}" && -d "${resolved}" && -z "${seen[${resolved}]:-}" ]]; then
+      seen["${resolved}"]=1
+      dirs+=("${resolved}")
+    fi
+  done < <(find -L "${external_root}" -maxdepth 4 -type d \( -name 'lib' -o -name 'lib64' \) \
+    \( -path '*/cuda_*/*' -o -path '*/nccl*/*' \) -print0 2>/dev/null)
+
+  if [[ "${#dirs[@]}" -eq 0 ]]; then
+    log "WARNING: Hermetic CUDA runtime libraries not found under ${external_root}. GPU validation may fail."
+    return 1
+  fi
+
+  HERMETIC_CUDA_LIB_PATHS="$(IFS=:; echo "${dirs[*]}")"
+  log "Discovered ${#dirs[@]} hermetic CUDA library roots"
+
+  local toolkit_root="${TF_REPO}/bazel-tensorflow/external/cuda_nvcc"
+  if [[ -z "${HERMETIC_CUDA_TOOLKIT_DIR:-}" && -d "${toolkit_root}" ]]; then
+    HERMETIC_CUDA_TOOLKIT_DIR="$(readlink -f "${toolkit_root}")"
+  fi
+  return 0
+}
+
+ensure_hermetic_cuda_runtime_env() {
+  if [[ "${HERMETIC_CUDA_LIBS_APPLIED:-0}" -eq 1 ]]; then
+    return
+  fi
+
+  if ! discover_hermetic_cuda_lib_dirs; then
+    return
+  fi
+
+  if [[ -z "${HERMETIC_CUDA_LIB_PATHS:-}" ]]; then
+    return
+  fi
+
+  log "Applying hermetic CUDA runtime library paths"
+  if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+    export LD_LIBRARY_PATH="${HERMETIC_CUDA_LIB_PATHS}:${LD_LIBRARY_PATH}"
+  else
+    export LD_LIBRARY_PATH="${HERMETIC_CUDA_LIB_PATHS}"
+  fi
+
+  if [[ -n "${HERMETIC_CUDA_TOOLKIT_DIR:-}" ]]; then
+    export CUDA_HOME="${HERMETIC_CUDA_TOOLKIT_DIR}"
+    export CUDA_PATH="${HERMETIC_CUDA_TOOLKIT_DIR}"
+    export CUDA_TOOLKIT_PATH="${HERMETIC_CUDA_TOOLKIT_DIR}"
+    export TF_CUDA_PATHS="${HERMETIC_CUDA_TOOLKIT_DIR}"
+    if [[ "${HERMETIC_XLA_DATA_FLAG_APPLIED:-0}" -eq 0 ]]; then
+      if [[ -n "${XLA_FLAGS:-}" ]]; then
+        export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_cuda_data_dir=${HERMETIC_CUDA_TOOLKIT_DIR}"
+      else
+        export XLA_FLAGS="--xla_gpu_cuda_data_dir=${HERMETIC_CUDA_TOOLKIT_DIR}"
+      fi
+      HERMETIC_XLA_DATA_FLAG_APPLIED=1
+    fi
+    log "CUDA toolkit directory pinned to ${HERMETIC_CUDA_TOOLKIT_DIR}"
+  fi
+
+  HERMETIC_CUDA_LIBS_APPLIED=1
 }
 
 
@@ -323,7 +472,16 @@ PY
       rm -rf "${VENV_DIR}"
     fi
     log "Creating Conda build environment at ${VENV_DIR} (Python ${PYTHON_VERSION})"
-    "${conda_bin}" create --yes -p "${VENV_DIR}" "python=${PYTHON_VERSION}" pip
+    local -a build_env_pkgs=(
+      "python=${PYTHON_VERSION}"
+      pip
+      mkl
+      mkl-include
+      mkl-service
+      intel-openmp
+      "blas=*=mkl"
+    )
+    "${conda_bin}" create --yes -p "${VENV_DIR}" "${build_env_pkgs[@]}"
   fi
 
   activate_build_python_env
@@ -413,42 +571,20 @@ bazel_full_clean() {
   log "Cleaning Bazel build outputs"
   "${BAZELISK_BIN}" shutdown >/dev/null 2>&1 || true
   "${BAZELISK_BIN}" clean --expunge >/dev/null 2>&1 || true
+  log "Bazel state reset complete"
 }
 
 run_profile_workload() {
   local profile_dir="$1"
   local wheel_path="$2"
 
+  ensure_hermetic_cuda_runtime_env
+
   log "Running profiling workload using ${wheel_path}"
-  activate_build_python_env
-  pip install --quiet --upgrade --force-reinstall "${wheel_path}"
-
   rm -f "${profile_dir}"/*.profraw
-  LLVM_PROFILE_FILE="${profile_dir}/tensorflow-%p.profraw" \
-    TF_CPP_MIN_LOG_LEVEL=1 \
-    python - <<'PY'
-import tensorflow as tf
-import numpy as np
-
-tf.random.set_seed(0)
-np.random.seed(0)
-
-inputs = tf.keras.Input(shape=(128,))
-x = tf.keras.layers.Dense(256, activation="relu")(inputs)
-x = tf.keras.layers.Dense(256, activation="relu")(x)
-outputs = tf.keras.layers.Dense(1)(x)
-model = tf.keras.Model(inputs, outputs)
-
-model.compile(optimizer="adam", loss="mse")
-
-x_data = np.random.rand(4096, 128).astype(np.float32)
-y_data = np.random.rand(4096, 1).astype(np.float32)
-
-model.fit(x_data, y_data, epochs=2, batch_size=128, verbose=0)
-model.predict(x_data[:256], verbose=0)
-PY
-
-  deactivate_build_python_env
+  log "Collecting LLVM profile data under ${profile_dir}"
+  log "Executing the full workload suite with profiling enabled; expect this to take several minutes."
+  run_workload_suite "${wheel_path}" "workloads-profile" "${profile_dir}"
 }
 
 merge_profile_data() {
@@ -461,7 +597,7 @@ merge_profile_data() {
     exit 1
   fi
 
-  log "Merging profile data into ${profdata}"
+  log "Merging ${#profraws[@]} profile shard(s) into ${profdata}"
   rm -f "${profdata}"
   llvm-profdata merge --output="${profdata}" "${profile_dir}/"*.profraw
 }
@@ -470,6 +606,7 @@ build_profiled_tensorflow() {
   rm -rf "${PROFILE_DIR}"
   mkdir -p "${PROFILE_DIR}"
 
+  log_stage "PGO: Instrumented build"
   bazel_full_clean
   build_tensorflow_wheel profile_generate "${PROFILE_DIR}"
   local instrumentation_wheel=""
@@ -479,10 +616,15 @@ build_profiled_tensorflow() {
     log "ERROR: Instrumented wheel not found after profile_generate build."
     exit 1
   fi
+  log "Instrumented wheel ready at ${instrumentation_wheel}"
 
+  log_stage "PGO: Profiling workload"
   run_profile_workload "${PROFILE_DIR}" "${instrumentation_wheel}"
+  log "Profile shards written to ${PROFILE_DIR}"
   merge_profile_data "${PROFILE_DIR}"
+  log "Profile summary available at ${PROFILE_DIR}/tensorflow.profdata"
 
+  log_stage "PGO: Optimized build"
   bazel_full_clean
   build_tensorflow_wheel profile_use "${PROFILE_DIR}"
 }
@@ -491,54 +633,37 @@ run_tensorflow_runtime_check() {
   local wheel_path="$1"
   local mode="$2"
   local use_high_perf="$3"
-  local venv_dir="${ROOT_DIR}/runtime-tests/${mode}"
+  local wheel_py_version
+  wheel_py_version="$(wheel_python_version "${wheel_path}")"
+  local py_tag="${wheel_py_version//./}"
+  local venv_dir="${ROOT_DIR}/runtime-tests/${mode}-py${py_tag}"
   local log_file="${LOG_DIR}/runtime-test-${mode}.log"
+  local sanity_script="${ROOT_DIR}/runtime-tests/workloads/sanity_runtime_check.py"
+
+  if [[ ! -f "${sanity_script}" ]]; then
+    log "Sanity workload script missing at ${sanity_script}"
+    exit 1
+  fi
+
+  ensure_hermetic_cuda_runtime_env
 
   log "Validating ${wheel_path} (${mode})"
-  rm -rf "${venv_dir}"
-  python3 -m venv "${venv_dir}"
+  create_ephemeral_conda_env "${venv_dir}" "${wheel_py_version}" mkl mkl-include mkl-service intel-openmp "blas=*=mkl"
+  local conda_bin
+  conda_bin="$(find_conda_binary)"
 
   (
     set -euo pipefail
     # shellcheck disable=SC1091
-    source "${venv_dir}/bin/activate"
+    eval "$("${conda_bin}" shell.bash hook)"
+    conda activate "${venv_dir}"
     python -m pip install --quiet --upgrade pip setuptools wheel numpy
     python -m pip install --quiet --upgrade "${wheel_path}"
     if [[ "${use_high_perf}" == "1" ]]; then
       # shellcheck disable=SC1090
       source "${ROOT_DIR}/activate_high_perf.sh"
     fi
-    python - <<'PY'
-import tensorflow as tf
-import numpy as np
-
-print("TensorFlow version:", tf.__version__)
-print("Available devices:", tf.config.list_logical_devices())
-
-def run_matmul(device_name: str) -> float:
-    size = 2048
-    with tf.device(device_name):
-        a = tf.random.uniform((size, size), dtype=tf.float32)
-        b = tf.random.uniform((size, size), dtype=tf.float32)
-        c = tf.matmul(a, b)
-        return float(tf.reduce_sum(c).numpy())
-
-cpu_sum = run_matmul("/CPU:0")
-print(f"CPU matmul checksum: {cpu_sum:.6f}")
-
-physical_gpus = tf.config.list_physical_devices("GPU")
-if not physical_gpus:
-    print("WARNING: No GPU devices detected by TensorFlow runtime; skipping GPU matmul.")
-else:
-    for gpu in physical_gpus:
-        try:
-            tf.config.experimental.set_memory_growth(gpu, True)
-        except Exception as exc:  # pylint: disable=broad-except
-            print(f"WARNING: Unable to enable memory growth on {gpu.name}: {exc}")
-
-    gpu_sum = run_matmul("/GPU:0")
-    print(f"GPU matmul checksum: {gpu_sum:.6f}")
-PY
+    python "${sanity_script}"
   ) >"${log_file}" 2>&1
 
   if grep -Ei '(warning|error)' "${log_file}" > "${log_file}.diag"; then
@@ -549,12 +674,188 @@ PY
     local mode_pretty="${mode^}"
     log "${mode_pretty} runtime check completed without warnings (log: ${log_file})"
   fi
+
+  rm -rf "${venv_dir}"
 }
 
 validate_tensorflow_runtime() {
   local wheel_path="$1"
   run_tensorflow_runtime_check "${wheel_path}" "baseline" "0"
   run_tensorflow_runtime_check "${wheel_path}" "high-perf" "1"
+}
+
+run_workload_suite() {
+  local wheel_path="$1"
+  local log_subdir="${2:-workloads}"
+  local profile_dir="${3:-}"
+
+  local runner="${ROOT_DIR}/runtime-tests/run_workloads.py"
+  if [[ ! -f "${runner}" ]]; then
+    log "Workload runner not found at ${runner}"
+    exit 1
+  fi
+
+  local python_bin="${VENV_DIR}/bin/python"
+  if [[ ! -x "${python_bin}" ]]; then
+    log "Python build environment missing (${python_bin})."
+    exit 1
+  fi
+
+  local logs_dir="${LOG_DIR}/${log_subdir}"
+  local summary_file="${logs_dir}/runtime-summary.json"
+  mkdir -p "${logs_dir}"
+
+  ensure_hermetic_cuda_runtime_env
+
+  local -a cmd=(
+    "${python_bin}" "${runner}"
+    --workloads-dir "${ROOT_DIR}/runtime-tests/workloads"
+    --log-dir "${logs_dir}"
+    --summary-file "${summary_file}"
+  )
+
+  if [[ -n "${wheel_path}" ]]; then
+    cmd+=(--wheel "${wheel_path}")
+  fi
+
+  if [[ -n "${profile_dir}" ]]; then
+    local profile_pattern="${profile_dir}/tensorflow-%p.profraw"
+    log "Executing workload suite with profiling enabled (logs: ${logs_dir}); expect multiple workloads to run sequentially."
+    log "LLVM_PROFILE_FILE=${profile_pattern}"
+    if ! LLVM_PROFILE_FILE="${profile_pattern}" "${cmd[@]}"; then
+      log "Workload suite failed during profiling. Inspect logs under ${logs_dir}"
+      exit 1
+    fi
+  else
+    log "Executing workload suite inside build virtualenv (logs: ${logs_dir}); this step runs all workloads and may take several minutes."
+    if ! "${cmd[@]}"; then
+      log "Workload suite failed. Inspect logs under ${logs_dir}"
+      exit 1
+    fi
+  fi
+}
+
+measure_reference_workloads() {
+  local runner="${ROOT_DIR}/runtime-tests/run_workloads.py"
+  if [[ ! -f "${runner}" ]]; then
+    log "Workload runner not found at ${runner}"
+    exit 1
+  fi
+
+  rm -rf "${REFERENCE_LOG_DIR}"
+  mkdir -p "${REFERENCE_LOG_DIR}"
+
+  create_ephemeral_conda_env "${REFERENCE_ENV_DIR}" "${PYTHON_VERSION}" mkl mkl-include mkl-service intel-openmp "blas=*=mkl"
+  local conda_bin
+  conda_bin="$(find_conda_binary)"
+
+  log "Activating reference environment to install tensorflow[and-cuda]"
+  (
+    set -euo pipefail
+    # shellcheck disable=SC1090,SC1091
+    eval "$("${conda_bin}" shell.bash hook)"
+    conda activate "${REFERENCE_ENV_DIR}"
+    log "Installing tensorflow[and-cuda] via pip inside reference environment"
+    pip install --quiet --upgrade pip
+    pip install --quiet "tensorflow[and-cuda]"
+    log "Starting reference workload suite (logs: ${REFERENCE_LOG_DIR})"
+    python "${runner}" \
+      --workloads-dir "${ROOT_DIR}/runtime-tests/workloads" \
+      --log-dir "${REFERENCE_LOG_DIR}" \
+      --summary-file "${REFERENCE_SUMMARY_FILE}"
+    log "Reference workload suite completed"
+  )
+
+  rm -rf "${REFERENCE_ENV_DIR}"
+  log "Reference workload summary saved to ${REFERENCE_SUMMARY_FILE}"
+}
+
+print_performance_comparison() {
+  local baseline_summary="${REFERENCE_SUMMARY_FILE}"
+  local optimized_summary="${LOG_DIR}/workloads/runtime-summary.json"
+
+  if [[ ! -f "${baseline_summary}" ]]; then
+    log "Baseline workload summary missing at ${baseline_summary}; skipping comparison."
+    return
+  fi
+  if [[ ! -f "${optimized_summary}" ]]; then
+    log "Optimized workload summary missing at ${optimized_summary}; skipping comparison."
+    return
+  fi
+
+  log "Baseline timings: ${baseline_summary}"
+  log "Optimized timings: ${optimized_summary}"
+
+  python - "${baseline_summary}" "${optimized_summary}" <<'PY'
+import json
+import sys
+from pathlib import Path
+from textwrap import shorten
+
+baseline = json.loads(Path(sys.argv[1]).read_text())
+optimized = json.loads(Path(sys.argv[2]).read_text())
+device_mapping = {
+    "sanity_runtime_check.py": "CPU/GPU",
+    "mlp_a.py": "GPU",
+    "mlp_b.py": "GPU",
+    "mlp_c.py": "CPU",
+    "mlp_d.py": "GPU",
+    "cnn_a.py": "GPU",
+    "cnn_b.py": "GPU",
+    "cnn_c.py": "CPU",
+    "cnn_d.py": "GPU",
+    "cnn_e.py": "GPU",
+    "cnn_f.py": "CPU",
+    "lstm_a.py": "GPU",
+    "lstm_b.py": "GPU",
+    "lstm_c.py": "CPU",
+    "gru_d.py": "GPU",
+    "rnn_e_sparse.py": "CPU",
+    "transformer_a.py": "GPU",
+    "transformer_b.py": "GPU",
+    "transformer_c.py": "CPU",
+    "transformer_d.py": "GPU",
+    "transformer_e.py": "GPU",
+    "cnn_g.py": "GPU",
+    "cnn_h.py": "CPU",
+    "mlp_e.py": "GPU",
+    "mlp_f.py": "CPU",
+    "autoencoder_a.py": "GPU",
+    "autoencoder_b.py": "CPU",
+    "transformer_f.py": "GPU",
+    "convnext_a.py": "GPU",
+    "spectrogram_a.py": "CPU",
+    "waveform_a.py": "GPU",
+    "generator_a.py": "GPU",
+    "generator_b.py": "CPU",
+    "generator_c.py": "GPU",
+    "generator_d.py": "CPU",
+    "generator_e.py": "GPU",
+    "generator_f.py": "CPU",
+    "generator_g.py": "GPU",
+    "generator_h.py": "CPU",
+    "generator_i.py": "GPU",
+    "generator_j.py": "CPU",
+}
+
+workloads = sorted(set(baseline) | set(optimized))
+if not workloads:
+    print("No workload timing data available.")
+    sys.exit(0)
+
+header = f"{'Workload':<28} {'Device':<8} {'Baseline (s)':>15} {'Optimized (s)':>15} {'Speedup':>10}"
+print(header)
+print("-" * len(header))
+for name in workloads:
+    b = baseline.get(name)
+    o = optimized.get(name)
+    b_str = f"{b:.2f}" if isinstance(b, (int, float)) else "n/a"
+    o_str = f"{o:.2f}" if isinstance(o, (int, float)) else "n/a"
+    speedup = (b / o) if (isinstance(b, (int, float)) and isinstance(o, (int, float)) and o > 0) else None
+    s_str = f"{speedup:.2f}x" if speedup else "n/a"
+    device = device_mapping.get(name, "?")
+    print(f"{shorten(name, width=28, placeholder='…'):<28} {device:<8} {b_str:>15} {o_str:>15} {s_str:>10}")
+PY
 }
 
 configure_tensorflow() {
@@ -744,7 +1045,7 @@ build_tensorflow_wheel() {
     )
   fi
 
-  log "Starting Bazel build (hermetic actions)"
+  log "Starting Bazel build (hermetic actions, mode=${mode})"
   build_opts+=('--repo_env=WHEEL_NAME=tensorflow')
   "${bazel}" build "${build_opts[@]}" //tensorflow/tools/pip_package:wheel
 
@@ -758,21 +1059,22 @@ build_tensorflow_wheel() {
   fi
 
   local produced_wheels
-  produced_wheels=($(find "${wheel_dir}" -maxdepth 1 -type f -name "*.whl"))
+  produced_wheels=($(find "${wheel_dir}" -maxdepth 1 -type f -name "*.whl" | sort))
   if [[ "${#produced_wheels[@]}" -eq 0 ]]; then
     log "No wheel found in ${wheel_dir}."
     exit 1
   fi
 
-  for wheel_path in "${produced_wheels[@]}"; do
-    local wheel_name
-    wheel_name="$(basename "${wheel_path}")"
-    rm -f "${out_dir}/${wheel_name}"
-    cp "${wheel_path}" "${out_dir}/${wheel_name}"
-    chmod u+w "${out_dir}/${wheel_name}"
-  done
+  local latest_wheel_path="${produced_wheels[-1]}"
+  local wheel_name
+  wheel_name="$(basename "${latest_wheel_path}")"
+  local destination="${out_dir}/${wheel_name}"
+  rm -f "${destination}"
+  cp "${latest_wheel_path}" "${destination}"
+  chmod u+w "${destination}"
 
-  LAST_BUILT_WHEELS=($(find "${out_dir}" -maxdepth 1 -type f -name "*.whl" -print))
+  LAST_BUILT_WHEELS=("${destination}")
+  log "Wheel artifact copied to ${out_dir}: ${destination}"
 
   # Restore host environment before leaving the workspace.
   if [[ -n "${_saved_ld}" ]]; then export LD_LIBRARY_PATH="${_saved_ld}"; else unset LD_LIBRARY_PATH; fi
@@ -781,14 +1083,17 @@ build_tensorflow_wheel() {
   popd >/dev/null
 
   if [[ "${mode}" == "profile_use" || "${mode}" == "release" ]]; then
+    log_stage "Runtime validation (${mode})"
     for wheel in "${LAST_BUILT_WHEELS[@]}"; do
       validate_tensorflow_runtime "${wheel}"
+      run_workload_suite "${wheel}"
     done
   fi
 }
 
 
 main() {
+  log_stage "Workspace preparation"
   ensure_directories
   ensure_system_prereqs
   check_perf_dependencies
@@ -797,19 +1102,32 @@ main() {
   export PATH="${TOOLS_DIR}:${PATH}"
   ensure_python_venv
 
+  log_stage "Reference baseline measurement"
+  measure_reference_workloads
+
+  log_stage "CUDA capability detection"
   detect_cuda_compute_capabilities
 
+  log_stage "TensorFlow source sync"
   local latest_tag
   log "Querying GitHub for latest TensorFlow release tag"
   latest_tag="$(fetch_latest_tag)"
   log "Latest TensorFlow release: ${latest_tag}"
 
   sync_tensorflow_source "${latest_tag}"
+
+  log_stage "Toolchain configuration"
   prepare_cuda_toolchain
   configure_tensorflow
+
+  log_stage "Profile-guided build"
   build_profiled_tensorflow
   "${BAZELISK_BIN}" shutdown >/dev/null 2>&1 || true
 
+  log_stage "Performance comparison"
+  print_performance_comparison
+
+  log_stage "Build complete"
   log "SUCCESS: Build complete. Wheels are available under ${DIST_DIR}"
 }
 

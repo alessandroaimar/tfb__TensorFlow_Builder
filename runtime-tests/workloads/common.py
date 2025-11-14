@@ -94,9 +94,6 @@ def apply_common_pipeline(dataset: tf.data.Dataset,
     """Apply the required tf.data transforms (map already handled externally)."""
     dataset = dataset.flat_map(lambda *elems: tf.data.Dataset.from_tensors(elems))
     dataset = dataset.batch(batch_size, drop_remainder=True)
-    dataset = dataset.unbatch()
-    dataset = dataset.batch(batch_size, drop_remainder=True)
-    dataset = dataset.cache()
     dataset = dataset.prefetch(prefetch_buffer)
     if use_prefetch_to_gpu:
         dataset = dataset.apply(tf.data.experimental.prefetch_to_device("/GPU:0"))

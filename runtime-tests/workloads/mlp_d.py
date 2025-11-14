@@ -61,7 +61,7 @@ def main():
     configure_device("GPU", "MLP-D")
     configure_threads(inter_op=1, intra_op=1)
 
-    batch_size = 1
+    batch_size = 3
     dataset = build_dataset(batch_size)
 
     model = build_model()
@@ -73,10 +73,11 @@ def main():
     )
 
     callback = BatchBeginCallback("mlp_d_batch_begin")
-    model.fit(dataset, epochs=3, steps_per_epoch=20, callbacks=[callback])
+    model.fit(dataset, epochs=5, steps_per_epoch=1000, callbacks=[callback])
 
     x_infer = tf.random.uniform((batch_size, 1024))
-    outputs = model(x_infer, training=False)
+    for _ in range(100):
+        outputs = model(x_infer, training=False)
     print("Inference logits:", outputs.numpy())
 
 

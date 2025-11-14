@@ -36,8 +36,6 @@ def build_dataset(batch_size: int) -> tf.data.Dataset:
     dataset = dataset.map(map_fn, num_parallel_calls=8)
     dataset = dataset.flat_map(lambda feats, lbl: tf.data.Dataset.from_tensors((feats, lbl)))
     dataset = dataset.batch(batch_size, drop_remainder=True)
-    dataset = dataset.unbatch()
-    dataset = dataset.batch(batch_size, drop_remainder=True)
     dataset = dataset.cache()
     dataset = dataset.prefetch(8)
     return dataset.with_options(dataset_options())
@@ -67,7 +65,7 @@ def main():
     configure_device("CPU", "RNN-E")
     configure_threads(inter_op=32, intra_op=16)
 
-    batch_size = 32
+    batch_size = 64
     dataset = build_dataset(batch_size)
 
     model = SparseClassifier()
@@ -79,10 +77,11 @@ def main():
     )
 
     callback = BatchEndCallback("rnn_e_batch_end")
-    model.fit(dataset, epochs=3, steps_per_epoch=20, callbacks=[callback])
+    model.fit(dataset, epochs=10, steps_per_epoch=3000, callbacks=[callback])
 
     sparse_sample = tf.sparse.from_dense(tf.where(tf.random.uniform((batch_size, VECTOR_DIM)) > 0.7, 1.0, 0.0))
-    outputs = model(sparse_sample, training=False)
+    for _ in range(100):
+        outputs = model(sparse_sample, training=False)
     print("Inference logits:", outputs[:1])
 
 

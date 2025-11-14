@@ -49,8 +49,6 @@ def build_dataset(batch_size: int) -> tf.data.Dataset:
     dataset = dataset.repeat()
     dataset = dataset.flat_map(lambda *elems: tf.data.Dataset.from_tensors(elems))
     dataset = dataset.batch(batch_size, drop_remainder=True)
-    dataset = dataset.unbatch()
-    dataset = dataset.batch(batch_size, drop_remainder=True)
 
     def add_masks(batch_tokens, batch_labels):
         mask = build_block_mask(tf.shape(batch_tokens)[0])
@@ -98,14 +96,15 @@ def main():
     )
 
     callback = BatchEndCallback("transformer_e_batch_end")
-    model.fit(dataset, epochs=3, steps_per_epoch=20, callbacks=[callback])
+    model.fit(dataset, epochs=5, steps_per_epoch=1000, callbacks=[callback])
 
     mask = build_block_mask(batch_size)
     x_infer = (
         tf.random.uniform((batch_size, SEQ_LEN), maxval=VOCAB, dtype=tf.int32),
         mask,
     )
-    outputs = model(x_infer, training=False)
+    for _ in range(100):
+        outputs = model(x_infer, training=False)
     print("Inference logits dtype:", outputs.dtype)
 
 

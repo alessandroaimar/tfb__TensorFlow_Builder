@@ -1,10 +1,12 @@
 .tf-build-venv/
+.tf-reference-venv/
 /dist/
 /logs/
 /profiles/
 /runtime-tests/*
 !/runtime-tests/workloads/
 !/runtime-tests/workloads/**
+!/runtime-tests/run_workloads.py
 /sources/*
 !/sources/README.md
 

@@ -119,20 +119,36 @@ set_env_default NCCL_LAUNCH_MODE "GROUP"
 set_env_default NUMBA_THREADING_LAYER "tbb"
 # set_env_default NUMBA_CPU_NAME "znver2"
 # Replace 'native' with the actual micro-architecture LLVM expects.
-export NUMBA_CPU_NAME="$(
-python3 - <<'PY'
-import llvmlite.binding as ll
-print(ll.get_host_cpu_name())
+_numba_cpu_name="$(
+python3 - <<'PY' 2>/dev/null || true
+try:
+    import llvmlite.binding as ll
+except Exception:
+    pass
+else:
+    print(ll.get_host_cpu_name())
 PY
 )"
+if [[ -n "${_numba_cpu_name}" ]]; then
+  export NUMBA_CPU_NAME="${_numba_cpu_name}"
+else
+  set_env_default NUMBA_CPU_NAME "native"
+fi
 
 # Optional: also pin exact CPU features for reproducibility.
-export NUMBA_CPU_FEATURES="$(
-python3 - <<'PY'
-import llvmlite.binding as ll
-print(ll.get_host_cpu_features().flatten())
+_numba_cpu_features="$(
+python3 - <<'PY' 2>/dev/null || true
+try:
+    import llvmlite.binding as ll
+except Exception:
+    pass
+else:
+    print(ll.get_host_cpu_features().flatten())
 PY
 )"
+if [[ -n "${_numba_cpu_features}" ]]; then
+  export NUMBA_CPU_FEATURES="${_numba_cpu_features}"
+fi
 
 set_env_default NUMBA_NUM_THREADS "${cpu_threads}"
 # set_env_default NUMBA_CACHE "1"

@@ -59,9 +59,6 @@ def build_dataset(batch_size: int) -> tf.data.Dataset:
         padded_shapes=(tf.TensorShape([None, FEATURE_DIM]), tf.TensorShape([])),
         drop_remainder=True,
     )
-    dataset = dataset.unbatch()
-    dataset = dataset.batch(batch_size, drop_remainder=True)
-    dataset = dataset.cache()
     dataset = dataset.prefetch(8)
     dataset = dataset.apply(tf.data.experimental.prefetch_to_device("/GPU:0"))
     return dataset.with_options(dataset_options())
@@ -102,7 +99,7 @@ def main():
     configure_device("GPU", "LSTM-A")
     configure_threads(inter_op=4, intra_op=16)
 
-    batch_size = 32
+    batch_size = 31
     dataset = build_dataset(batch_size)
 
     model = SequenceClassifier()
@@ -114,10 +111,11 @@ def main():
     )
 
     callback = BatchEndCallback("lstm_a_batch_end")
-    model.fit(dataset, epochs=3, steps_per_epoch=20, callbacks=[callback])
+    model.fit(dataset, epochs=1, steps_per_epoch=1000, callbacks=[callback])
 
     x_infer = tf.random.uniform((batch_size, 60, FEATURE_DIM))
-    outputs = model(x_infer, training=False)
+    for _ in range(100):
+        outputs = model(x_infer, training=False)
     print("Inference logits shape:", outputs.shape)
 
 

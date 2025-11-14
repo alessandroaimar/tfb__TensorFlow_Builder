@@ -76,10 +76,11 @@ def main():
     )
 
     callback = BatchBeginCallback("cnn_c_batch_begin")
-    model.fit(dataset, epochs=3, steps_per_epoch=20, callbacks=[callback])
+    model.fit(dataset, epochs=5, steps_per_epoch=1000, callbacks=[callback])
 
     x_infer = tf.random.uniform((batch_size, 32, 32, 3))
-    outputs = model(x_infer, training=False)
+    for _ in range(100):
+        outputs = model(x_infer, training=False)
     print("Inference logits sample:", outputs[0, :5])
 
 

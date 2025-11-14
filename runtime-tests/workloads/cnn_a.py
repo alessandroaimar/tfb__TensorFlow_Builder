@@ -105,7 +105,7 @@ def main():
     configure_threads(inter_op=4, intra_op=16)
     tf.keras.mixed_precision.set_global_policy("mixed_float16")
 
-    batch_size = 64
+    batch_size = 63
     dataset = build_dataset(batch_size)
 
     model = build_model()
@@ -118,10 +118,11 @@ def main():
     )
 
     callback = BatchBeginCallback("cnn_a_batch_begin")
-    model.fit(dataset, epochs=3, steps_per_epoch=20, callbacks=[callback])
+    model.fit(dataset, epochs=4, steps_per_epoch=1000, callbacks=[callback])
 
     x_infer = tf.random.uniform((batch_size, 32, 32, 3), dtype=tf.float16)
-    outputs = model(x_infer, training=False)
+    for _ in range(100):
+        outputs = model(x_infer, training=False)
     print("Inference logits dtype:", outputs.dtype)
 
 

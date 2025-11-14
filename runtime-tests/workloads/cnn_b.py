@@ -34,8 +34,6 @@ def build_dataset(batch_size: int) -> tf.data.Dataset:
     labels = np.random.randint(0, 10, size=(num_samples,), dtype=np.int32)
     dataset = tf.data.Dataset.from_tensor_slices((images, labels))
 
-    dataset = dataset.batch(8).unbatch()
-
     def augment_fn(image, label):
         image = tf.cast(image, tf.float32)
         image = tf.py_function(_random_crop_py, inp=[image], Tout=tf.float32)
@@ -69,7 +67,7 @@ def main():
     configure_device("GPU", "CNN-B")
     configure_threads(inter_op=4, intra_op=8)
 
-    batch_size = 32
+    batch_size = 30
     dataset = build_dataset(batch_size)
 
     model = build_model()
@@ -81,10 +79,11 @@ def main():
     )
 
     callback = BatchEndCallback("cnn_b_batch_end")
-    model.fit(dataset, epochs=3, steps_per_epoch=20, callbacks=[callback])
+    model.fit(dataset, epochs=4, steps_per_epoch=1000, callbacks=[callback])
 
     x_infer = tf.random.uniform((batch_size, 32, 32, 3))
-    outputs = model(x_infer, training=False)
+    for _ in range(100):
+        outputs = model(x_infer, training=False)
     print("Inference logits shape:", outputs.shape)
 
 
