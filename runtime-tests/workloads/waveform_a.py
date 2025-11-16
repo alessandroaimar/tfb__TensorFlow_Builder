@@ -13,7 +13,7 @@ def build_dataset(batch_size: int) -> tf.data.Dataset:
     labels = np.random.randint(0, 30, size=(num_samples,), dtype=np.int32)
     dataset = tf.data.Dataset.from_tensor_slices((wave, labels))
     dataset = dataset.shuffle(1024).repeat()
-    dataset = dataset.map(lambda x, y: (tf.signal.hilbert(x), y), num_parallel_calls=8)
+    dataset = dataset.map(lambda x, y: (tf.complex(x, tf.zeros_like(x)), y), num_parallel_calls=8)
     return apply_common_pipeline(dataset, batch_size=batch_size, prefetch_buffer=32, use_prefetch_to_gpu=True)
 
 
@@ -26,7 +26,7 @@ def residual_block(x, dilation):
 
 def build_model() -> tf.keras.Model:
     inputs = tf.keras.layers.Input(shape=(1024, 2), dtype=tf.complex64)
-    x = tf.math.real(inputs)
+    x = tf.keras.layers.Lambda(lambda z: tf.math.real(z))(inputs)
     x = tf.keras.layers.Conv1D(128, 5, padding="causal", activation="relu")(x)
     for dilation in (1, 2, 4, 8, 16):
         x = residual_block(x, dilation)
@@ -52,7 +52,7 @@ def main():
     )
 
     callback = BatchEndCallback("waveform_a_batch_end")
-    model.fit(dataset, epochs=5, steps_per_epoch=1000, callbacks=[callback])
+    model.fit(dataset, epochs=5, steps_per_epoch=200, callbacks=[callback])
 
     x_infer = tf.complex(tf.random.normal((batch_size, 1024, 2)), tf.random.normal((batch_size, 1024, 2)))
     for _ in range(100):

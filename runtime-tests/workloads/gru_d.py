@@ -84,7 +84,7 @@ def main():
     )
 
     callback = BatchEndCallback("gru_d_batch_end")
-    model.fit(dataset, epochs=5, steps_per_epoch=1000, callbacks=[callback])
+    model.fit(dataset, epochs=7, steps_per_epoch=1000, callbacks=[callback])
 
     x_infer = tf.random.uniform((batch_size, SEQ_LEN, FEATURES))
     for _ in range(100):

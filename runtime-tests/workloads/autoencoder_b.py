@@ -36,7 +36,7 @@ def main():
     model.compile(optimizer=tf.keras.optimizers.Adam(5e-4), loss="mae", jit_compile=False)
 
     callback = BatchEndCallback("autoencoder_b_batch_end")
-    model.fit(dataset, epochs=5, steps_per_epoch=1000, callbacks=[callback])
+    model.fit(dataset, epochs=1, steps_per_epoch=800, callbacks=[callback])
 
     x_infer = tf.random.normal((batch_size, 40, 32))
     for _ in range(100):

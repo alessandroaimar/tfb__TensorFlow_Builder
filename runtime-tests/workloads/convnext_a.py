@@ -32,6 +32,8 @@ def layerscale_block(x, filters, layer_scale=1e-5):
     x = tf.keras.layers.Dense(4 * filters, activation="gelu")(x)
     x = tf.keras.layers.Dense(filters)(x)
     x = LayerScale(layer_scale)(x)
+    if input_tensor.shape[-1] != filters:
+        input_tensor = tf.keras.layers.Conv2D(filters, 1, padding="same")(input_tensor)
     return tf.keras.layers.Add()([input_tensor, x])
 
 
@@ -72,7 +74,7 @@ def main():
     )
 
     callback = BatchEndCallback("convnext_a_batch_end")
-    model.fit(dataset, epochs=5, steps_per_epoch=1000, callbacks=[callback])
+    model.fit(dataset, epochs=2, steps_per_epoch=1000, callbacks=[callback])
 
     x_infer = tf.random.uniform((batch_size, 96, 96, 3))
     for _ in range(100):

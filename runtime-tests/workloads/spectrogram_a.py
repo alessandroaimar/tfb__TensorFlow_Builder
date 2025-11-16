@@ -8,11 +8,11 @@ from common import BatchEndCallback, apply_common_pipeline, configure_device, co
 
 
 def build_dataset(batch_size: int) -> tf.data.Dataset:
-    samples = np.random.randn(6000, 2048).astype(np.float32)
-    labels = np.random.randint(0, 12, size=(6000,), dtype=np.int32)
+    samples = np.random.randn(2000, 512).astype(np.float32)
+    labels = np.random.randint(0, 12, size=(2000,), dtype=np.int32)
 
     def preprocess(wave, label):
-        spec = tf.signal.stft(wave, frame_length=256, frame_step=128)
+        spec = tf.signal.stft(wave, frame_length=128, frame_step=64)
         spec = tf.abs(spec)[..., tf.newaxis]
         spec = tf.image.resize(spec, (64, 64))
         return spec, label
@@ -27,7 +27,8 @@ def build_model() -> tf.keras.Model:
     x = tf.keras.layers.Conv2D(32, 5, padding="same", activation="relu")(inputs)
     x = tf.keras.layers.MaxPooling2D()(x)
     x = tf.keras.layers.Conv2D(64, 3, padding="same", activation="relu")(x)
-    attn = tf.keras.layers.Attention()([tf.reshape(x, (-1, 32, 128)), tf.reshape(x, (-1, 32, 128))])
+    seq = tf.keras.layers.Reshape((32 * 32, 64))(x)
+    attn = tf.keras.layers.Attention()([seq, seq])
     attn = tf.keras.layers.Flatten()(attn)
     logits = identity_layer()(tf.keras.layers.Dense(12)(attn))
     return tf.keras.Model(inputs, logits)
@@ -38,7 +39,7 @@ def main():
     configure_device("CPU", "Spectrogram-A")
     configure_threads(inter_op=2, intra_op=6)
 
-    batch_size = 48
+    batch_size = 32
     dataset = build_dataset(batch_size)
 
     model = build_model()
@@ -50,7 +51,7 @@ def main():
     )
 
     callback = BatchEndCallback("spectrogram_a_batch_end")
-    model.fit(dataset, epochs=5, steps_per_epoch=1000, callbacks=[callback])
+    model.fit(dataset, epochs=1, steps_per_epoch=80, callbacks=[callback])
 
     x_infer = tf.random.normal((batch_size, 64, 64, 1))
     for _ in range(100):

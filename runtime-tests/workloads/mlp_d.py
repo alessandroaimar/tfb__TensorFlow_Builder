@@ -73,7 +73,7 @@ def main():
     )
 
     callback = BatchBeginCallback("mlp_d_batch_begin")
-    model.fit(dataset, epochs=5, steps_per_epoch=1000, callbacks=[callback])
+    model.fit(dataset, epochs=8, steps_per_epoch=1000, callbacks=[callback])
 
     x_infer = tf.random.uniform((batch_size, 1024))
     for _ in range(100):

@@ -83,7 +83,7 @@ def main():
     )
 
     callback = BatchEndCallback("transformer_b_batch_end")
-    model.fit(dataset, epochs=5, steps_per_epoch=1000, callbacks=[callback])
+    model.fit(dataset, epochs=4, steps_per_epoch=1000, callbacks=[callback])
 
     mask = tf.where(tf.sequence_mask(tf.constant([60] * batch_size), MAX_LEN), 1.0, 0.0)
     x_infer = (

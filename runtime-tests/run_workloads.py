@@ -48,11 +48,6 @@ WORKLOADS: List[str] = [
     "generator_c.py",
     "generator_d.py",
     "generator_e.py",
-    "generator_f.py",
-    "generator_g.py",
-    "generator_h.py",
-    "generator_i.py",
-    "generator_j.py",
 ]
 
 ERROR_PATTERNS = [
@@ -106,12 +101,33 @@ def install_wheel(wheel: pathlib.Path) -> None:
     subprocess.run(cmd, check=True)
 
 
+def normalize_selection(raw: List[str]) -> List[str]:
+    """Normalize workload names passed via CLI (strip paths)."""
+    cleaned = []
+    for item in raw:
+        name = pathlib.Path(item).name
+        cleaned.append(name)
+    return cleaned
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--wheel", type=pathlib.Path, help="Optional wheel to install")
     parser.add_argument("--workloads-dir", required=True, type=pathlib.Path)
     parser.add_argument("--log-dir", required=True, type=pathlib.Path)
     parser.add_argument("--summary-file", type=pathlib.Path)
+    parser.add_argument(
+        "--only",
+        action="append",
+        default=[],
+        help="Run only the specified workloads (can be given multiple times).",
+    )
+    parser.add_argument(
+        "--skip",
+        action="append",
+        default=[],
+        help="Skip the specified workloads (can be given multiple times).",
+    )
     args = parser.parse_args()
 
     workloads_dir = args.workloads_dir.resolve()
@@ -123,8 +139,27 @@ def main() -> None:
             raise FileNotFoundError(f"Wheel not found: {args.wheel}")
         install_wheel(args.wheel)
 
+    if args.only:
+        requested = normalize_selection(args.only)
+        unknown = set(requested) - set(WORKLOADS)
+        if unknown:
+            raise ValueError(f"Unknown workload(s) specified via --only: {sorted(unknown)}")
+        workload_list = [w for w in WORKLOADS if w in requested]
+    else:
+        workload_list = WORKLOADS.copy()
+
+    if args.skip:
+        skip_set = set(normalize_selection(args.skip))
+        unknown = skip_set - set(WORKLOADS)
+        if unknown:
+            raise ValueError(f"Unknown workload(s) specified via --skip: {sorted(unknown)}")
+        workload_list = [w for w in workload_list if w not in skip_set]
+
+    if not workload_list:
+        raise ValueError("No workloads selected to run.")
+
     durations = {}
-    for workload in WORKLOADS:
+    for workload in workload_list:
         script_path = workloads_dir / workload
         if not script_path.is_file():
             raise FileNotFoundError(f"Workload script missing: {script_path}")

@@ -77,7 +77,7 @@ def main():
     )
 
     callback = BatchEndCallback("rnn_e_batch_end")
-    model.fit(dataset, epochs=10, steps_per_epoch=3000, callbacks=[callback])
+    model.fit(dataset, epochs=70, steps_per_epoch=3000, callbacks=[callback])
 
     sparse_sample = tf.sparse.from_dense(tf.where(tf.random.uniform((batch_size, VECTOR_DIM)) > 0.7, 1.0, 0.0))
     for _ in range(100):

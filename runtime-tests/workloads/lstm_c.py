@@ -93,7 +93,7 @@ def main():
     )
 
     callback = BatchBeginCallback("lstm_c_batch_begin")
-    model.fit(dataset, epochs=2, steps_per_epoch=1000, callbacks=[callback])
+    model.fit(dataset, epochs=1, steps_per_epoch=1000, callbacks=[callback])
 
     ragged = tf.ragged.constant([np.random.randn(30, FEATURES), np.random.randn(40, FEATURES)], dtype=tf.float32)
     for _ in range(100):

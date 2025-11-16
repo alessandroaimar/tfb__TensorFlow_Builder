@@ -41,16 +41,11 @@ python runtime-tests/workloads/<script>.py
 | `convnext_a.py` | ConvNeXt-A | GPU | fp32 | On | 28 | ConvNeXt-style blocks with LayerScale |
 | `spectrogram_a.py` | Spectrogram-A | CPU | fp32 | Off | 48 | STFT + Conv2D + attention classifier |
 | `waveform_a.py` | Waveform-A | GPU | fp32 | On | 36 | Dilated residual temporal CNN on complex waveforms |
-| `generator_a.py` | Generator-A | GPU | fp32 | On | 48 | Generator-fed matmul tensor mixer |
-| `generator_b.py` | Generator-B | CPU | fp32 | Off | 32 | Residual matmul analyzer from generator input |
-| `generator_c.py` | Generator-C | GPU | fp32 | On | 40 | Spectral generator with concat attention |
-| `generator_d.py` | Generator-D | CPU | fp32 | Off | 28 | Auto-regressive generator matmul block |
-| `generator_e.py` | Generator-E | GPU | fp32 | On | 36 | Reshape-heavy latent projector from generator data |
-| `generator_f.py` | Generator-F | CPU | fp32 | Off | 54 | Streaming generator matmul pooling network |
-| `generator_g.py` | Generator-G | GPU | fp32 | On | 44 | Dual matmul tower with concatenation |
-| `generator_h.py` | Generator-H | CPU | fp32 | Off | 60 | Transpose-first attention on generator tensors |
-| `generator_i.py` | Generator-I | GPU | fp32 | On | 30 | Matmul residual mixer from generator samples |
-| `generator_j.py` | Generator-J | CPU | fp32 | Off | 26 | Tensor reshaper driven by generator inputs |
+| `generator_a.py` | Generator-A | GPU | fp32 | On | 44 | py_function FFT features with random flips and separable conv head |
+| `generator_b.py` | Generator-B | CPU | fp32 | Off | 36 | Windowed tf.data pipeline that aggregates stateless noise |
+| `generator_c.py` | Generator-C | GPU | fp32 | On | 40 | Ragged variable-length sequences padded and fed through attention |
+| `generator_d.py` | Generator-D | CPU | fp32 | Off | 32 | Interleave-heavy stateless_uniform features for matmul stacks |
+| `generator_e.py` | Generator-E | GPU | fp32 | On | 36 | tf.data.scan-driven FFT features with jit-enabled classifier |
 
 ## Suite Guarantees
 

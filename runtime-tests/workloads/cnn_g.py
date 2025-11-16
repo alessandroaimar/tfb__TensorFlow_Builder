@@ -63,7 +63,7 @@ def main():
     )
 
     callback = BatchEndCallback("cnn_g_batch_end")
-    model.fit(dataset, epochs=5, steps_per_epoch=1000, callbacks=[callback])
+    model.fit(dataset, epochs=4, steps_per_epoch=1000, callbacks=[callback])
 
     x_infer = tf.random.uniform((batch_size, 64, 64, 3))
     for _ in range(100):
